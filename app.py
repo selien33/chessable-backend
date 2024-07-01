@@ -348,12 +348,7 @@ def handle_abandon(data):
     
     end_game(game_id, winner, 'abandon')
 
-def handle_player_disconnect(game_id, player_id):
-    """Handle player disconnection during game"""
-    if game_id in active_games:
-        game = active_games[game_id]
-        winner = game.black_player if player_id == game.white_player else game.white_player
-        end_game(game_id, winner, 'disconnect')
+
 
 # Add this to your app.py
 @app.before_request
@@ -367,6 +362,12 @@ def handle_preflight():
         res.headers['Access-Control-Allow-Credentials'] = 'true'
         return res
 
+def handle_player_disconnect(game_id, player_id):
+    """Handle player disconnection during game"""
+    if game_id in active_games:
+        game = active_games[game_id]
+        winner = game.black_player if player_id == game.white_player else game.white_player
+        end_game(game_id, winner, 'disconnect')
 
 def check_for_match():
     """Check if we can match two players from the waiting list"""
