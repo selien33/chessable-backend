@@ -45,3 +45,4 @@ class ChessGame:
         if self.board.is_checkmate():
             return self.black_player if self.current_turn == 'white' else self.white_player
         return None
+
