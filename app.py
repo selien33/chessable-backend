@@ -173,6 +173,10 @@ def evaluate_position():
         return jsonify(response.json())
     except requests.exceptions.RequestException as e:
         return jsonify({'error': f'Stockfish service error: {str(e)}'}), 500
+    
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "service": "backend"})
 
 def update_game_result(game_id, winner):
     """Update game result and player statistics"""
