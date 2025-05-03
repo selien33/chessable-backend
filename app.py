@@ -1,30 +1,34 @@
 # backend/app.py
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
+import hashlib
+import os
 from azure_storage import AzureTableStorage
 from chess_logic import ChessGame
+import threading
+import time
+import json
 
 app = Flask(__name__)
-"""CORS(app, resources={
+CORS(app, resources={
     r"/*": {
         "origins": [
             "https://delightful-moss-0bc16db03.6.azurestaticapps.net",
-            "http://localhost:5173"
-        ]
+            "http://localhost:5173",
+            "http://localhost:8080"
+        ],
+        "supports_credentials": True
     }
 })
 socketio = SocketIO(app, cors_allowed_origins=[
     "https://delightful-moss-0bc16db03.6.azurestaticapps.net",
-    "http://localhost:5173"
-])"""
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*") # less secure but may work
+    "http://localhost:5173",
+    "http://localhost:8080"
+], manage_session=False)
 
-# Initialize Azure Table Storage
-# storage = AzureTableStorage()
 # Initialize Azure Table Storage
 storage = None
 try:
@@ -36,218 +40,129 @@ except Exception as e:
 
 # In-memory game state
 active_games = {}
-waiting_players = []
+player_heartbeats = {}  # Track player heartbeats
+
+def hash_password(password):
+    """Hash a password for storing."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(stored_password, provided_password):
+    """Verify a stored password against user provided password."""
+    return stored_password == hash_password(provided_password)
 
 @app.route('/api/register', methods=['POST'])
 def register():
-    #debugging
-    print("Register endpoint called")
     data = request.json
     username = data.get('username')
+    password = data.get('password')
     
-    if not username:
-        return jsonify({'error': 'Username required'}), 400
+    if not username or not password:
+        return jsonify({'error': 'Username and password required'}), 400
     
-    user_id = str(uuid.uuid4())
+    if len(password) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters'}), 400
     
-    if storage:
-        try:
-            user_data = {
-                'PartitionKey': 'users',
-                'RowKey': user_id,
-                'username': username,
-                'created_at': datetime.utcnow().isoformat(),
-                'games_played': 0,
-                'wins': 0
-            }
-            storage.insert_entity('users', user_data)
-        except Exception as e:
-            print(f"Storage error: {e}")
-    else:
-        print(f"Registered user {username} without storage")
-    
-    return jsonify({'user_id': user_id, 'username': username})
-    """data = request.json
-    username = data.get('username')
-    
-    if not username:
-        return jsonify({'error': 'Username required'}), 400
+    # Check if username already exists
+    existing_user = storage.query_entities('users', f"username eq '{username}'")
+    if list(existing_user):
+        return jsonify({'error': 'Username already exists'}), 400
     
     user_id = str(uuid.uuid4())
     user_data = {
         'PartitionKey': 'users',
         'RowKey': user_id,
         'username': username,
+        'password': hash_password(password),
         'created_at': datetime.utcnow().isoformat(),
         'games_played': 0,
         'wins': 0
     }
     
     storage.insert_entity('users', user_data)
-    return jsonify({'user_id': user_id, 'username': username})"""
+    return jsonify({'user_id': user_id, 'username': username})
 
-@app.route('/api/user/<user_id>', methods=['GET'])
-def get_user(user_id):
-    user = storage.get_entity('users', 'users', user_id)
-    if not user:
-        return jsonify({'error': 'User not found'}), 404
-    return jsonify(user)
-
-@socketio.on('connect')
-def handle_connect():
-    print(f"Client connected: {request.sid}")
-
-@socketio.on('join_game')
-def handle_join_game(data):
-    user_id = data.get('user_id')
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json
     username = data.get('username')
+    password = data.get('password')
     
-    if not user_id or not username:
-        emit('error', {'message': 'Invalid user data'})
-        return
+    if not username or not password:
+        return jsonify({'error': 'Username and password required'}), 400
     
-    # Add player to waiting list or match with existing player
-    if waiting_players:
-        opponent = waiting_players.pop(0)
-        game_id = str(uuid.uuid4())
-        
-        # Create new game
-        game = ChessGame(game_id, user_id, opponent['user_id'])
-        active_games[game_id] = game
-        
-        # Store game in Azure Table
-        game_data = {
-            'PartitionKey': 'games',
-            'RowKey': game_id,
-            'white_player': user_id,
-            'black_player': opponent['user_id'],
-            'state': game.get_fen(),
-            'moves': '',
-            'created_at': datetime.utcnow().isoformat(),
-            'status': 'active'
-        }
-        storage.insert_entity('games', game_data)
-        
-        # First, join the current player to the room
-        join_room(game_id)
-        
-        # Notify the opponent to join
-        emit('game_started', {
-            'game_id': game_id,
-            'white': {'id': user_id, 'username': username},
-            'black': {'id': opponent['user_id'], 'username': opponent['username']},
-            'fen': game.get_fen()
-        }, room=opponent['sid'])
-        
-        # Then notify both players
-        emit('game_started', {
-            'game_id': game_id,
-            'white': {'id': user_id, 'username': username},
-            'black': {'id': opponent['user_id'], 'username': opponent['username']},
-            'fen': game.get_fen()
-        }, room=game_id)
-    else:
-        waiting_players.append({
-            'user_id': user_id,
-            'username': username,
-            'sid': request.sid
-        })
-        emit('waiting_for_opponent')
-    """user_id = data.get('user_id')
-    username = data.get('username')
+    # Find user by username
+    users = storage.query_entities('users', f"username eq '{username}'")
+    user = next(iter(users), None)
     
-    if not user_id or not username:
-        emit('error', {'message': 'Invalid user data'})
-        return
+    if not user or not verify_password(user['password'], password):
+        return jsonify({'error': 'Invalid username or password'}), 401
     
-    # Add player to waiting list or match with existing player
-    if waiting_players:
-        opponent = waiting_players.pop(0)
-        game_id = str(uuid.uuid4())
-        
-        # Create new game
-        game = ChessGame(game_id, user_id, opponent['user_id'])
-        active_games[game_id] = game
-        
-        # Store game in Azure Table
-        game_data = {
-            'PartitionKey': 'games',
-            'RowKey': game_id,
-            'white_player': user_id,
-            'black_player': opponent['user_id'],
-            'state': game.get_fen(),
-            'moves': '',
-            'created_at': datetime.utcnow().isoformat(),
-            'status': 'active'
-        }
-        storage.insert_entity('games', game_data)
-        
-        # Notify both players
-        join_room(game_id)
-        join_room(game_id, sid=opponent['sid'])
-        
-        emit('game_started', {
-            'game_id': game_id,
-            'white': {'id': user_id, 'username': username},
-            'black': {'id': opponent['user_id'], 'username': opponent['username']},
-            'fen': game.get_fen()
-        }, room=game_id)
-    else:
-        waiting_players.append({
-            'user_id': user_id,
-            'username': username,
-            'sid': request.sid
-        })
-        emit('waiting_for_opponent')"""
+    # Create session
+    session['user_id'] = user['RowKey']
+    session['username'] = user['username']
+    
+    return jsonify({
+        'user_id': user['RowKey'],
+        'username': user['username']
+    })
 
-@socketio.on('make_move')
-def handle_move(data):
-    game_id = data.get('game_id')
-    user_id = data.get('user_id')
-    move = data.get('move')
-    
-    if game_id not in active_games:
-        emit('error', {'message': 'Game not found'})
-        return
-    
-    game = active_games[game_id]
-    
-    if not game.is_player_turn(user_id):
-        emit('error', {'message': 'Not your turn'})
-        return
-    
-    if game.make_move(move):
-        # Update game state in Azure Table
-        storage.update_entity('games', {
-            'PartitionKey': 'games',
-            'RowKey': game_id,
-            'state': game.get_fen(),
-            'moves': game.get_moves_string()
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({'message': 'Logged out successfully'})
+
+@app.route('/api/check-auth', methods=['GET'])
+def check_auth():
+    if 'user_id' in session:
+        return jsonify({
+            'authenticated': True,
+            'user_id': session['user_id'],
+            'username': session['username']
         })
-        
-        emit('move_made', {
-            'fen': game.get_fen(),
-            'move': move,
-            'turn': game.current_turn
-        }, room=game_id)
-        
-        # Check for game end
-        if game.is_checkmate():
-            winner = game.get_winner()
-            emit('game_over', {'winner': winner, 'reason': 'checkmate'}, room=game_id)
-            update_game_result(game_id, winner)
-        elif game.is_stalemate():
-            emit('game_over', {'winner': None, 'reason': 'stalemate'}, room=game_id)
-            update_game_result(game_id, None)
-    else:
-        emit('error', {'message': 'Invalid move'})
+    return jsonify({'authenticated': False}), 401
 
+@app.route('/api/games/history', methods=['GET'])
+def get_game_history():
+    if 'user_id' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    user_id = session['user_id']
+    
+    # Get games where user was either white or black player
+    games = []
+    white_games = storage.query_entities('games', f"white_player eq '{user_id}' and status eq 'completed'")
+    black_games = storage.query_entities('games', f"black_player eq '{user_id}' and status eq 'completed'")
+    
+    for game in white_games:
+        games.append(game)
+    for game in black_games:
+        games.append(game)
+    
+    # Sort by completed_at date
+    games.sort(key=lambda x: x.get('completed_at', ''), reverse=True)
+    
+    return jsonify({'games': games})
 
-@app.route('/api/evaluate', methods=['POST'])
-def evaluate_position():
-    """Proxy request to Stockfish Container App for chess evaluation"""
+@app.route('/api/games/<game_id>', methods=['GET'])
+def get_game(game_id):
+    if 'user_id' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    game = storage.get_entity('games', 'games', game_id)
+    if not game:
+        return jsonify({'error': 'Game not found'}), 404
+    
+    # Check if user was part of this game
+    user_id = session['user_id']
+    if game['white_player'] != user_id and game['black_player'] != user_id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    return jsonify(game)
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze_position():
+    """Proxy request to Stockfish Container App for chess analysis"""
     import requests
-    import os
     
     data = request.json
     fen = data.get('fen')
@@ -256,41 +171,257 @@ def evaluate_position():
     if not fen:
         return jsonify({'error': 'FEN position required'}), 400
     
-    # Get the Container App URL from environment variable
     stockfish_url = os.environ.get('STOCKFISH_CONTAINER_URL')
     
     if not stockfish_url:
         return jsonify({'error': 'Stockfish service not configured'}), 500
     
     try:
-        # Ensure the URL doesn't have trailing slash and add the endpoint
         base_url = stockfish_url.rstrip('/')
         response = requests.post(
             f"{base_url}/evaluate", 
             json={'fen': fen, 'depth': depth},
-            timeout=10  # Add timeout to prevent hanging
+            timeout=10
         )
         
         return jsonify(response.json())
     except requests.exceptions.RequestException as e:
         return jsonify({'error': f'Stockfish service error: {str(e)}'}), 500
-    
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok", "service": "backend"})
 
-def update_game_result(game_id, winner):
-    """Update game result and player statistics"""
+@socketio.on('connect')
+def handle_connect():
+    print(f"Client connected: {request.sid}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print(f"Client disconnected: {request.sid}")
+    # Remove from waiting list if present
+    global waiting_players
+    waiting_players = [p for p in waiting_players if p['sid'] != request.sid]
+    
+    # Handle disconnection during game
+    for game_id, game in active_games.items():
+        if request.sid in player_heartbeats:
+            player_id = player_heartbeats[request.sid]['user_id']
+            if game.white_player == player_id or game.black_player == player_id:
+                handle_player_disconnect(game_id, player_id)
+                break
+
+@socketio.on('join_waiting_list')
+def handle_join_waiting():
+    if 'user_id' not in session:
+        emit('error', {'message': 'Not authenticated'})
+        return
+    
+    user_id = session['user_id']
+    username = session['username']
+    
+    # Add to waiting list table
+    waiting_entry = {
+        'PartitionKey': 'waiting',
+        'RowKey': user_id,
+        'username': username,
+        'sid': request.sid,
+        'joined_at': datetime.utcnow().isoformat()
+    }
+    
+    try:
+        storage.insert_entity('waitinglist', waiting_entry)
+    except:
+        # Already in waiting list
+        storage.update_entity('waitinglist', waiting_entry)
+    
+    emit('waiting_for_opponent')
+    check_for_match()
+
+def check_for_match():
+    """Check if we can match two players from the waiting list"""
+    waiting = list(storage.query_entities('waitinglist', "PartitionKey eq 'waiting'"))
+    
+    if len(waiting) >= 2:
+        # Sort by joined_at to ensure FIFO
+        waiting.sort(key=lambda x: x['joined_at'])
+        
+        player1 = waiting[0]
+        player2 = waiting[1]
+        
+        # Remove both from waiting list
+        storage.delete_entity('waitinglist', 'waiting', player1['RowKey'])
+        storage.delete_entity('waitinglist', 'waiting', player2['RowKey'])
+        
+        # Create game
+        create_game(player1, player2)
+
+def create_game(player1, player2):
+    """Create a new game between two players"""
+    game_id = str(uuid.uuid4())
+    
+    # Create game instance
+    game = ChessGame(game_id, player1['RowKey'], player2['RowKey'])
+    active_games[game_id] = game
+    
+    # Store in currentgames table
+    game_data = {
+        'PartitionKey': 'current',
+        'RowKey': game_id,
+        'white_player': player1['RowKey'],
+        'black_player': player2['RowKey'],
+        'white_username': player1['username'],
+        'black_username': player2['username'],
+        'state': game.get_fen(),
+        'moves': '',
+        'created_at': datetime.utcnow().isoformat(),
+        'status': 'active',
+        'last_heartbeat': datetime.utcnow().isoformat()
+    }
+    
+    storage.insert_entity('currentgames', game_data)
+    
+    # Initialize heartbeats
+    player_heartbeats[player1['sid']] = {
+        'user_id': player1['RowKey'],
+        'game_id': game_id,
+        'last_heartbeat': datetime.utcnow()
+    }
+    player_heartbeats[player2['sid']] = {
+        'user_id': player2['RowKey'],
+        'game_id': game_id,
+        'last_heartbeat': datetime.utcnow()
+    }
+    
+    # Notify both players
+    socketio.emit('game_started', {
+        'game_id': game_id,
+        'white': {'id': player1['RowKey'], 'username': player1['username']},
+        'black': {'id': player2['RowKey'], 'username': player2['username']},
+        'fen': game.get_fen()
+    }, room=player1['sid'])
+    
+    socketio.emit('game_started', {
+        'game_id': game_id,
+        'white': {'id': player1['RowKey'], 'username': player1['username']},
+        'black': {'id': player2['RowKey'], 'username': player2['username']},
+        'fen': game.get_fen()
+    }, room=player2['sid'])
+
+@socketio.on('heartbeat')
+def handle_heartbeat(data):
+    game_id = data.get('game_id')
+    
+    if request.sid in player_heartbeats:
+        player_heartbeats[request.sid]['last_heartbeat'] = datetime.utcnow()
+        
+        # Update game heartbeat in storage
+        try:
+            storage.update_entity('currentgames', {
+                'PartitionKey': 'current',
+                'RowKey': game_id,
+                'last_heartbeat': datetime.utcnow().isoformat()
+            })
+        except:
+            pass
+
+@socketio.on('make_move')
+def handle_move(data):
+    game_id = data.get('game_id')
+    move = data.get('move')
+    
+    if game_id not in active_games:
+        emit('error', {'message': 'Game not found'})
+        return
+    
     game = active_games[game_id]
     
-    # Update game status
-    storage.update_entity('games', {
+    if not game.is_player_turn(session['user_id']):
+        emit('error', {'message': 'Not your turn'})
+        return
+    
+    if game.make_move(move):
+        # Update game state in current games
+        storage.update_entity('currentgames', {
+            'PartitionKey': 'current',
+            'RowKey': game_id,
+            'state': game.get_fen(),
+            'moves': game.get_moves_string()
+        })
+        
+        # Get both players' sessions
+        players_sids = []
+        for sid, data in player_heartbeats.items():
+            if data['game_id'] == game_id:
+                players_sids.append(sid)
+        
+        # Emit to both players
+        for sid in players_sids:
+            socketio.emit('move_made', {
+                'fen': game.get_fen(),
+                'move': move,
+                'turn': game.current_turn
+            }, room=sid)
+        
+        # Check for game end
+        if game.is_checkmate():
+            winner = game.get_winner()
+            end_game(game_id, winner, 'checkmate')
+        elif game.is_stalemate():
+            end_game(game_id, None, 'stalemate')
+    else:
+        emit('error', {'message': 'Invalid move'})
+
+@socketio.on('abandon_game')
+def handle_abandon(data):
+    game_id = data.get('game_id')
+    
+    if game_id not in active_games:
+        emit('error', {'message': 'Game not found'})
+        return
+    
+    game = active_games[game_id]
+    abandoning_player = session['user_id']
+    
+    # Determine winner (opponent of abandoning player)
+    winner = game.black_player if abandoning_player == game.white_player else game.white_player
+    
+    end_game(game_id, winner, 'abandon')
+
+def handle_player_disconnect(game_id, player_id):
+    """Handle player disconnection during game"""
+    if game_id in active_games:
+        game = active_games[game_id]
+        winner = game.black_player if player_id == game.white_player else game.white_player
+        end_game(game_id, winner, 'disconnect')
+
+def end_game(game_id, winner, reason):
+    """End a game and update all necessary tables"""
+    if game_id not in active_games:
+        return
+    
+    game = active_games[game_id]
+    
+    # Move from currentgames to games table
+    current_game = storage.get_entity('currentgames', 'current', game_id)
+    
+    # Create completed game entry
+    completed_game = {
         'PartitionKey': 'games',
         'RowKey': game_id,
+        'white_player': game.white_player,
+        'black_player': game.black_player,
+        'white_username': current_game['white_username'],
+        'black_username': current_game['black_username'],
+        'state': game.get_fen(),
+        'moves': game.get_moves_string(),
+        'created_at': current_game['created_at'],
+        'completed_at': datetime.utcnow().isoformat(),
         'status': 'completed',
         'winner': winner,
-        'completed_at': datetime.utcnow().isoformat()
-    })
+        'end_reason': reason
+    }
+    
+    storage.insert_entity('games', completed_game)
+    
+    # Delete from current games
+    storage.delete_entity('currentgames', 'current', game_id)
     
     # Update player statistics
     if winner:
@@ -310,9 +441,45 @@ def update_game_result(game_id, winner):
             player_data['games_played'] += 1
             storage.update_entity('users', player_data)
     
-    # Remove game from active games
+    # Notify players
+    players_sids = []
+    for sid, data in player_heartbeats.items():
+        if data['game_id'] == game_id:
+            players_sids.append(sid)
+    
+    for sid in players_sids:
+        socketio.emit('game_over', {
+            'winner': winner,
+            'reason': reason
+        }, room=sid)
+    
+    # Clean up
     del active_games[game_id]
+    for sid, data in list(player_heartbeats.items()):
+        if data['game_id'] == game_id:
+            del player_heartbeats[sid]
 
+# Heartbeat checker thread
+def check_heartbeats():
+    while True:
+        time.sleep(5)  # Check every 5 seconds
+        current_time = datetime.utcnow()
+        
+        for sid, data in list(player_heartbeats.items()):
+            last_heartbeat = data['last_heartbeat']
+            if (current_time - last_heartbeat).total_seconds() > 10:  # 10 seconds timeout
+                # Player is disconnected
+                game_id = data['game_id']
+                user_id = data['user_id']
+                handle_player_disconnect(game_id, user_id)
+
+# Start heartbeat checker
+heartbeat_thread = threading.Thread(target=check_heartbeats, daemon=True)
+heartbeat_thread.start()
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "service": "backend"})
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000)
