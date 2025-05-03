@@ -13,20 +13,9 @@ import time
 import json
 
 app = Flask(__name__)
-CORS(app, resources={
-    r"/*": {
-        "origins": [
-            "https://delightful-moss-0bc16db03.6.azurestaticapps.net",
-            "http://localhost:5173",
-            "http://localhost:8080"
-        ],
-        "supports_credentials": True
-    }
-})
+CORS(app)
 socketio = SocketIO(app, cors_allowed_origins=[
     "https://delightful-moss-0bc16db03.6.azurestaticapps.net",
-    "http://localhost:5173",
-    "http://localhost:8080"
 ], manage_session=False)
 
 # Initialize Azure Table Storage
