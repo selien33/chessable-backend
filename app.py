@@ -1,5 +1,5 @@
 # backend/app.py
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, Response
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from datetime import datetime, timedelta
@@ -15,12 +15,36 @@ import json
 app = Flask(__name__)
 
 app.secret_key = os.environ.get("SECRET_KEY")
+#For cookies
+app.config.update(
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='None',
+    SESSION_COOKIE_NAME='session',
+    SESSION_COOKIE_PARTITIONED=True,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=31)
+)
 
+# CORS configuration
+CORS(app, 
+    supports_credentials=True, 
+    origins=["https://delightful-moss-0bc16db03.6.azurestaticapps.net"],
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "OPTIONS"]
+)
+
+# Update socketio configuration
+socketio = SocketIO(app, 
+    cors_allowed_origins=["https://delightful-moss-0bc16db03.6.azurestaticapps.net"],
+    manage_session=False,
+    async_mode='threading'
+)
+"""
 CORS(app, supports_credentials=True, origins=[
     "https://delightful-moss-0bc16db03.6.azurestaticapps.net"
 ])
 socketio = SocketIO(app, cors_allowed_origins="*")
-"""
+
 socketio = SocketIO(app, cors_allowed_origins=[
     "https://delightful-moss-0bc16db03.6.azurestaticapps.net",
 ], manage_session=False)
@@ -188,27 +212,39 @@ def analyze_position():
 @socketio.on('connect')
 def handle_connect():
     print(f"Client connected: {request.sid}")
+    if 'user_id' not in session:
+        return False  # Reject the connection if not authenticated
+    emit('connection_established', {'status': 'connected'})
 
 @socketio.on('disconnect')
-def handle_disconnect(sid):
+def handle_disconnect():
     print(f"Client disconnected: {request.sid}")
+    sid = request.sid
     # Remove from waiting list if present
     global waiting_players
-    waiting_players = [p for p in waiting_players if p['sid'] != request.sid]
+    waiting_players = [p for p in waiting_players if p['sid'] != sid]
     
     # Handle disconnection during game
-    for game_id, game in active_games.items():
-        if request.sid in player_heartbeats:
-            player_id = player_heartbeats[request.sid]['user_id']
-            if game.white_player == player_id or game.black_player == player_id:
-                handle_player_disconnect(game_id, player_id)
-                break
+    if sid in player_heartbeats:
+        player_id = player_heartbeats[sid]['user_id']
+        game_id = player_heartbeats[sid]['game_id']
+        if game_id:
+            handle_player_disconnect(game_id, player_id)
+
+@socketio.on_error()
+def error_handler(e):
+    print(f"Socket error: {e}")
+
 
 @socketio.on('join_waiting_list')
 def handle_join_waiting():
+    print(f"Join waiting list request from {request.sid}")
+    print(f"Session data: {session}")
+    
     if 'user_id' not in session:
+        print(f"User not authenticated in session")
         emit('error', {'message': 'Not authenticated'})
-        return
+        return False
     
     user_id = session['user_id']
     username = session['username']
@@ -231,75 +267,6 @@ def handle_join_waiting():
     emit('waiting_for_opponent')
     check_for_match()
 
-def check_for_match():
-    """Check if we can match two players from the waiting list"""
-    waiting = list(storage.query_entities('waitinglist', "PartitionKey eq 'waiting'"))
-    
-    if len(waiting) >= 2:
-        # Sort by joined_at to ensure FIFO
-        waiting.sort(key=lambda x: x['joined_at'])
-        
-        player1 = waiting[0]
-        player2 = waiting[1]
-        
-        # Remove both from waiting list
-        storage.delete_entity('waitinglist', 'waiting', player1['RowKey'])
-        storage.delete_entity('waitinglist', 'waiting', player2['RowKey'])
-        
-        # Create game
-        create_game(player1, player2)
-
-def create_game(player1, player2):
-    """Create a new game between two players"""
-    game_id = str(uuid.uuid4())
-    
-    # Create game instance
-    game = ChessGame(game_id, player1['RowKey'], player2['RowKey'])
-    active_games[game_id] = game
-    
-    # Store in currentgames table
-    game_data = {
-        'PartitionKey': 'current',
-        'RowKey': game_id,
-        'white_player': player1['RowKey'],
-        'black_player': player2['RowKey'],
-        'white_username': player1['username'],
-        'black_username': player2['username'],
-        'state': game.get_fen(),
-        'moves': '',
-        'created_at': datetime.utcnow().isoformat(),
-        'status': 'active',
-        'last_heartbeat': datetime.utcnow().isoformat()
-    }
-    
-    storage.insert_entity('currentgames', game_data)
-    
-    # Initialize heartbeats
-    player_heartbeats[player1['sid']] = {
-        'user_id': player1['RowKey'],
-        'game_id': game_id,
-        'last_heartbeat': datetime.utcnow()
-    }
-    player_heartbeats[player2['sid']] = {
-        'user_id': player2['RowKey'],
-        'game_id': game_id,
-        'last_heartbeat': datetime.utcnow()
-    }
-    
-    # Notify both players
-    socketio.emit('game_started', {
-        'game_id': game_id,
-        'white': {'id': player1['RowKey'], 'username': player1['username']},
-        'black': {'id': player2['RowKey'], 'username': player2['username']},
-        'fen': game.get_fen()
-    }, room=player1['sid'])
-    
-    socketio.emit('game_started', {
-        'game_id': game_id,
-        'white': {'id': player1['RowKey'], 'username': player1['username']},
-        'black': {'id': player2['RowKey'], 'username': player2['username']},
-        'fen': game.get_fen()
-    }, room=player2['sid'])
 
 @socketio.on('heartbeat')
 def handle_heartbeat(data):
@@ -387,6 +354,90 @@ def handle_player_disconnect(game_id, player_id):
         game = active_games[game_id]
         winner = game.black_player if player_id == game.white_player else game.white_player
         end_game(game_id, winner, 'disconnect')
+
+# Add this to your app.py
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        res = Response()
+        res.headers['X-Content-Type-Options'] = '*'
+        res.headers['Access-Control-Allow-Origin'] = 'https://delightful-moss-0bc16db03.6.azurestaticapps.net'
+        res.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        res.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        res.headers['Access-Control-Allow-Credentials'] = 'true'
+        return res
+
+
+def check_for_match():
+    """Check if we can match two players from the waiting list"""
+    waiting = list(storage.query_entities('waitinglist', "PartitionKey eq 'waiting'"))
+    
+    if len(waiting) >= 2:
+        # Sort by joined_at to ensure FIFO
+        waiting.sort(key=lambda x: x['joined_at'])
+        
+        player1 = waiting[0]
+        player2 = waiting[1]
+        
+        # Remove both from waiting list
+        storage.delete_entity('waitinglist', 'waiting', player1['RowKey'])
+        storage.delete_entity('waitinglist', 'waiting', player2['RowKey'])
+        
+        # Create game
+        create_game(player1, player2)
+
+def create_game(player1, player2):
+    """Create a new game between two players"""
+    game_id = str(uuid.uuid4())
+    
+    # Create game instance
+    game = ChessGame(game_id, player1['RowKey'], player2['RowKey'])
+    active_games[game_id] = game
+    
+    # Store in currentgames table
+    game_data = {
+        'PartitionKey': 'current',
+        'RowKey': game_id,
+        'white_player': player1['RowKey'],
+        'black_player': player2['RowKey'],
+        'white_username': player1['username'],
+        'black_username': player2['username'],
+        'state': game.get_fen(),
+        'moves': '',
+        'created_at': datetime.utcnow().isoformat(),
+        'status': 'active',
+        'last_heartbeat': datetime.utcnow().isoformat()
+    }
+    
+    storage.insert_entity('currentgames', game_data)
+    
+    # Initialize heartbeats
+    player_heartbeats[player1['sid']] = {
+        'user_id': player1['RowKey'],
+        'game_id': game_id,
+        'last_heartbeat': datetime.utcnow()
+    }
+    player_heartbeats[player2['sid']] = {
+        'user_id': player2['RowKey'],
+        'game_id': game_id,
+        'last_heartbeat': datetime.utcnow()
+    }
+    
+    # Notify both players
+    socketio.emit('game_started', {
+        'game_id': game_id,
+        'white': {'id': player1['RowKey'], 'username': player1['username']},
+        'black': {'id': player2['RowKey'], 'username': player2['username']},
+        'fen': game.get_fen()
+    }, room=player1['sid'])
+    
+    socketio.emit('game_started', {
+        'game_id': game_id,
+        'white': {'id': player1['RowKey'], 'username': player1['username']},
+        'black': {'id': player2['RowKey'], 'username': player2['username']},
+        'fen': game.get_fen()
+    }, room=player2['sid'])
+
 
 def end_game(game_id, winner, reason):
     """End a game and update all necessary tables"""
