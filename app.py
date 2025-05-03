@@ -13,7 +13,10 @@ import time
 import json
 
 app = Flask(__name__)
-CORS(app)
+
+CORS(app, supports_credentials=True, origins=[
+    "https://delightful-moss-0bc16db03.6.azurestaticapps.net"
+])
 socketio = SocketIO(app, cors_allowed_origins="*")
 """
 socketio = SocketIO(app, cors_allowed_origins=[
