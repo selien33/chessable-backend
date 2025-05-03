@@ -16,6 +16,10 @@ CORS(app, resources={
         ]
     }
 })
+socketio = SocketIO(app, cors_allowed_origins=[
+    "https://delightful-moss-0bc16db03.6.azurestaticapps.net",
+    "http://localhost:5173"
+])
 
 # Initialize Azure Table Storage
 # storage = AzureTableStorage()
