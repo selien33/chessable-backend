@@ -8,7 +8,7 @@ from azure_storage import AzureTableStorage
 from chess_logic import ChessGame
 
 app = Flask(__name__)
-CORS(app, resources={
+"""CORS(app, resources={
     r"/*": {
         "origins": [
             "https://delightful-moss-0bc16db03.6.azurestaticapps.net",
@@ -19,7 +19,9 @@ CORS(app, resources={
 socketio = SocketIO(app, cors_allowed_origins=[
     "https://delightful-moss-0bc16db03.6.azurestaticapps.net",
     "http://localhost:5173"
-])
+])"""
+CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*") # less secure but may work
 
 # Initialize Azure Table Storage
 # storage = AzureTableStorage()
