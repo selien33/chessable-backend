@@ -14,6 +14,8 @@ import json
 
 app = Flask(__name__)
 
+app.secret_key = os.environ.get("SECRET_KEY")
+
 CORS(app, supports_credentials=True, origins=[
     "https://delightful-moss-0bc16db03.6.azurestaticapps.net"
 ])
