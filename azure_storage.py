@@ -6,6 +6,12 @@ import os
 class AzureTableStorage:
     def __init__(self):
         connection_string = os.environ.get('AZURE_STORAGE_CONNECTION_STRING')
+        print(f"Connection string exists: {bool(connection_string)}")
+        print(f"Connection string length: {len(connection_string) if connection_string else 0}")
+        
+        if not connection_string:
+            raise ValueError("AZURE_STORAGE_CONNECTION_STRING environment variable is not set")
+        
         self.table_service = TableServiceClient.from_connection_string(connection_string)
         self.ensure_tables_exist()
     

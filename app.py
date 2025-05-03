@@ -18,7 +18,15 @@ CORS(app, resources={
 })
 
 # Initialize Azure Table Storage
-storage = AzureTableStorage()
+# storage = AzureTableStorage()
+# Initialize Azure Table Storage
+storage = None
+try:
+    storage = AzureTableStorage()
+    print("Storage initialized successfully")
+except Exception as e:
+    print(f"Storage initialization failed: {e}")
+    print("Continuing without storage...")
 
 # In-memory game state
 active_games = {}
@@ -26,7 +34,34 @@ waiting_players = []
 
 @app.route('/api/register', methods=['POST'])
 def register():
+    #debugging
+    print("Register endpoint called")
     data = request.json
+    username = data.get('username')
+    
+    if not username:
+        return jsonify({'error': 'Username required'}), 400
+    
+    user_id = str(uuid.uuid4())
+    
+    if storage:
+        try:
+            user_data = {
+                'PartitionKey': 'users',
+                'RowKey': user_id,
+                'username': username,
+                'created_at': datetime.utcnow().isoformat(),
+                'games_played': 0,
+                'wins': 0
+            }
+            storage.insert_entity('users', user_data)
+        except Exception as e:
+            print(f"Storage error: {e}")
+    else:
+        print(f"Registered user {username} without storage")
+    
+    return jsonify({'user_id': user_id, 'username': username})
+    """data = request.json
     username = data.get('username')
     
     if not username:
@@ -43,7 +78,7 @@ def register():
     }
     
     storage.insert_entity('users', user_data)
-    return jsonify({'user_id': user_id, 'username': username})
+    return jsonify({'user_id': user_id, 'username': username})"""
 
 @app.route('/api/user/<user_id>', methods=['GET'])
 def get_user(user_id):
