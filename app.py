@@ -128,6 +128,60 @@ def handle_join_game(data):
         }
         storage.insert_entity('games', game_data)
         
+        # First, join the current player to the room
+        join_room(game_id)
+        
+        # Notify the opponent to join
+        emit('game_started', {
+            'game_id': game_id,
+            'white': {'id': user_id, 'username': username},
+            'black': {'id': opponent['user_id'], 'username': opponent['username']},
+            'fen': game.get_fen()
+        }, room=opponent['sid'])
+        
+        # Then notify both players
+        emit('game_started', {
+            'game_id': game_id,
+            'white': {'id': user_id, 'username': username},
+            'black': {'id': opponent['user_id'], 'username': opponent['username']},
+            'fen': game.get_fen()
+        }, room=game_id)
+    else:
+        waiting_players.append({
+            'user_id': user_id,
+            'username': username,
+            'sid': request.sid
+        })
+        emit('waiting_for_opponent')
+    """user_id = data.get('user_id')
+    username = data.get('username')
+    
+    if not user_id or not username:
+        emit('error', {'message': 'Invalid user data'})
+        return
+    
+    # Add player to waiting list or match with existing player
+    if waiting_players:
+        opponent = waiting_players.pop(0)
+        game_id = str(uuid.uuid4())
+        
+        # Create new game
+        game = ChessGame(game_id, user_id, opponent['user_id'])
+        active_games[game_id] = game
+        
+        # Store game in Azure Table
+        game_data = {
+            'PartitionKey': 'games',
+            'RowKey': game_id,
+            'white_player': user_id,
+            'black_player': opponent['user_id'],
+            'state': game.get_fen(),
+            'moves': '',
+            'created_at': datetime.utcnow().isoformat(),
+            'status': 'active'
+        }
+        storage.insert_entity('games', game_data)
+        
         # Notify both players
         join_room(game_id)
         join_room(game_id, sid=opponent['sid'])
@@ -144,7 +198,7 @@ def handle_join_game(data):
             'username': username,
             'sid': request.sid
         })
-        emit('waiting_for_opponent')
+        emit('waiting_for_opponent')"""
 
 @socketio.on('make_move')
 def handle_move(data):
