@@ -31,10 +31,11 @@ try:
     storage = AzureTableStorage()
     print("Storage initialized successfully")
 except Exception as e:
-    print(f"Storage initialization failed: {e}")
-    print("Continuing without storage...")
+    print(f"!!!!!!!!!!!!!!!!!!!!!!!Storage initialization failed: {e}")
+    print("!!!!!!!!!!!!!!!!!!!!!!!!Continuing without storage...")
 
 # In-memory game state
+waiting_players = []  # Track players waiting for a game
 active_games = {}
 player_heartbeats = {}  # Track player heartbeats
 
@@ -189,7 +190,7 @@ def handle_connect():
     print(f"Client connected: {request.sid}")
 
 @socketio.on('disconnect')
-def handle_disconnect():
+def handle_disconnect(sid):
     print(f"Client disconnected: {request.sid}")
     # Remove from waiting list if present
     global waiting_players
