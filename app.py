@@ -14,10 +14,12 @@ import json
 
 app = Flask(__name__)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
+"""
 socketio = SocketIO(app, cors_allowed_origins=[
     "https://delightful-moss-0bc16db03.6.azurestaticapps.net",
 ], manage_session=False)
-
+"""
 # Initialize Azure Table Storage
 storage = None
 try:
